@@ -16,15 +16,17 @@ np.random.seed(119)
 #===================================================================#
 # dataset params
 data_root = '../_datasets/cifar/'
-random_labelled_portion = 0.01
-total_labelled_portion = 0.03
+random_labelled_portion = 0.03
+total_labelled_portion = 0.05
 
 # model params
-resume_ckpt_path = "./ckpts_random_selection/ckpt_resnet18_data_001_acc_44_2.pth"
+resume_ckpt_dir = "./ckpts_random_selection"
+resume_ckpt_file = "ckpt_resnet18_data_003_acc_63_2.pth"
+resume_ckpt_path = os.path.join(resume_ckpt_dir, resume_ckpt_file)
 ckpt_dir = './ckpts_acc_selection/'
 net = ResNet18()
 net_reload = ResNet18()
-ckpt_model_name = "resnet18_data_003"
+ckpt_model_name = "resnet18_data_005"
 
 # training params
 batch_size = 32
@@ -65,8 +67,15 @@ net_reload.load_state_dict(checkpoint['net'])
 # Losses for each unlabelled Data
 #===================================================================#
 # compute loss for each unlabeled sample
-# losses = acc_over_unlabeled(net_reload, loader_train_unlabeled, device)
-losses = np.load("./docs/losses_on_unlabeled_ckpt_random_001.npy")
+losses_unlabeled_file_path = os.path.join(
+    resume_ckpt_dir,
+    "losses_unlabeled__" + resume_ckpt_file.split(".")[0] + ".npy")
+if os.path.isfile(losses_unlabeled_file_path):
+    losses = np.load(losses_unlabeled_file_path)
+else:
+    losses = acc_over_unlabeled(net_reload, loader_train_unlabeled, device)
+    np.save(losses_unlabeled_file_path, losses)
+
 
 # sort the losses from highest to lowest
 sorted_indices = np.argsort(losses)[::-1]
@@ -74,11 +83,12 @@ indices_to_sample = sorted_indices[:num_of_still_to_label]
 
 # visualize the distributions before and after AL
 plt.figure()
-plt.hist(list(np.asarray(train_set_unlabeled.targets, dtype=np.int64)[indices_to_sample]))
+plt.hist(train_set_labeled.targets + list(np.asarray(train_set_unlabeled.targets, dtype=np.int64)[indices_to_sample]))
 plt.hist(train_set_labeled.targets)
 plt.xticks(np.arange(10), train_set_labeled.classes)
 plt.ylabel("num samples / class")
 plt.legend(["class dist. after AL", "class dist. before AL"])
+plt.show()
 
 # label additional data
 loader_train_labeled = label_additional_data(train_set_labeled, train_set_unlabeled, indices_to_sample, batch_size)
