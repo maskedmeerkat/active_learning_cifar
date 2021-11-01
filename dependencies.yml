@@ -1,0 +1,10 @@
+name: al_cifar10
+channels:
+- conda-forge
+- defaults
+- pytorch
+dependencies:
+- pytorch
+- torchvision
+- matplotlib
+- tqdm
