@@ -121,6 +121,28 @@ def test_after_epoch(epoch, net, val_loader, device, criterion, best_acc, ckpt_d
     return best_acc
 
 
+def acc_over_unlabeled(net, val_loader, device):
+    # setup progressbar
+    val_loader_with_progbar = tqdm(val_loader, unit="batch")
+    val_loader_with_progbar.set_description(f"Accuracy over unlabeled Data ")
+
+    # setup for next epoch
+    net.eval()
+    batch_size = val_loader.batch_size
+    losses = np.zeros(val_loader.sampler.num_samples)
+    criterion = nn.CrossEntropyLoss(reduction='none')
+    with torch.no_grad():
+        for i_batch, (inputs, targets) in enumerate(val_loader_with_progbar):
+            # perform inference
+            inputs, targets = inputs.to(device), targets.to(device)
+            outputs = net(inputs)
+
+            # compute metrics
+            curr_losses = criterion(outputs, targets).cpu().detach().numpy()
+            losses[i_batch*batch_size:(i_batch+1)*batch_size] = curr_losses
+    return losses
+
+
 def prepare_dataloaders(data_root, batch_size, labelled_portion):
     # define the dataloader transformation for train & val
     trafo_train = transforms.Compose([
@@ -167,3 +189,12 @@ def random_index_generation(train_set_full, labelled_portion):
     random_indices = np.random.choice(num_train_samples, num_train_samples, replace=False)
     num_labeled_samples = int(num_train_samples * labelled_portion)
     return random_indices, num_labeled_samples
+
+
+def label_additional_data(train_set_labeled, train_set_unlabeled, indices_to_sample, batch_size):
+    train_set_labeled.data = np.append(train_set_labeled.data,
+                                       train_set_unlabeled.data[indices_to_sample, ...], axis=0)
+    train_set_labeled.targets += list(np.asarray(train_set_unlabeled.targets, dtype=np.int64)[indices_to_sample])
+
+    return torch.utils.data.DataLoader(train_set_labeled, batch_size=batch_size, shuffle=True, num_workers=0)
+

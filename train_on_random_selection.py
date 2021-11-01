@@ -14,13 +14,13 @@ np.random.seed(119)
 #===================================================================#
 # dataset params
 data_root = '../_datasets/cifar/'
-labelled_portion = 0.1
+labelled_portion = 0.01
 
 # model params
 resume_ckpt = False  # set to false, if you don't want to resume
 ckpt_dir = './ckpts_random/'
 net = ResNet18()
-ckpt_model_name = "resnet18_data_010"
+ckpt_model_name = "resnet18_data_001"
 
 # training params
 batch_size = 32
