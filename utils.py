@@ -2,13 +2,41 @@ import torch
 import torch.nn as nn
 import torch.nn.init as init
 import os
+import glob
 import torchvision.transforms as transforms
 from tqdm import tqdm
 import torchvision
 import copy
 import numpy as np
+from PIL import Image
 
-CIFAR10_CLASSES = ('plane', 'car', 'bird', 'cat', 'deer', 'dog', 'frog', 'horse', 'ship', 'truck')
+
+class MNIST(torchvision.datasets.MNIST):
+    def __getitem__(self, index: int):
+        """
+        Args:
+            index (int): Index
+
+        Returns:
+            tuple: (image, target) where target is index of the target class.
+        """
+        img, target = self.data[index], int(self.targets[index])
+
+        # doing this so that it is consistent with all other datasets
+        # to return a PIL Image
+        if isinstance(img, np.ndarray):
+            img = np.tile(img[:, :, np.newaxis], (1, 1, 3))
+        else:
+            img = np.tile(img.numpy()[:, :, np.newaxis], (1, 1, 3))
+        img = Image.fromarray(img)
+
+        if self.transform is not None:
+            img = self.transform(img)
+
+        if self.target_transform is not None:
+            target = self.target_transform(target)
+
+        return img, target
 
 
 def get_mean_and_std(dataset):
@@ -42,7 +70,9 @@ def init_params(net):
                 init.constant(m.bias, 0)
 
 
-def train_for_an_epoch(epoch, net, train_loader, device, optimizer, criterion):
+def train_for_an_epoch(epoch, net, train_loader, optimizer, criterion):
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
     # setup progressbar
     train_loader_with_progbar = tqdm(train_loader, unit="batch")
     train_loader_with_progbar.set_description(f"Epoch {epoch}")
@@ -75,7 +105,10 @@ def train_for_an_epoch(epoch, net, train_loader, device, optimizer, criterion):
         )
 
 
-def test_after_epoch(epoch, net, val_loader, device, criterion, best_acc, ckpt_dir, ckpt_model_name):
+def test_after_epoch(epoch, net, val_loader, criterion, best_acc, ckpt_dir, ckpt_model_name,
+                     current_labelled_portion, resume_ckpt_path):
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
     # setup progressbar
     val_loader_with_progbar = tqdm(val_loader, unit="batch")
     val_loader_with_progbar.set_description(f"      {epoch}")
@@ -108,20 +141,27 @@ def test_after_epoch(epoch, net, val_loader, device, criterion, best_acc, ckpt_d
     average_accuracy = running_correct / total_num_samples
     if average_accuracy > best_acc:
         print('Saving..')
-        state = {
-            'net': net.state_dict(),
-            'acc': average_accuracy,
-            'epoch': epoch,
-        }
+        # create checkpoint directory, if it doesn't exist
         os.makedirs(ckpt_dir, exist_ok=True)
-        accuracy_str = f"acc_{int(average_accuracy)}_{round(average_accuracy%1*10)}"
-        torch.save(state, os.path.join(ckpt_dir, f'ckpt_{ckpt_model_name}_{accuracy_str}.pth'))
+        # create a state to store
+        state = {'net': net.state_dict(), 'acc': average_accuracy, 'epoch': epoch}
+        # define a ckpt name
+        accuracy_str = f"acc_{round(average_accuracy)}_{round(average_accuracy%1*10)}"
+        data_portion_str = f"labelled_{int(current_labelled_portion*100):03}"
+        resume_ckpt_path = os.path.join(ckpt_dir, f'ckpt_{data_portion_str}_{ckpt_model_name}_{accuracy_str}.pth')
+        # remove all ckpts in current ckpt dir that used the same portion of labelled data
+        [os.remove(filename) for filename in glob.glob(os.path.join(ckpt_dir, f'ckpt_{data_portion_str}_*'))]
+        # store the new ckpt
+        torch.save(state, resume_ckpt_path)
+        # update the best accuracy
         best_acc = average_accuracy
 
-    return best_acc
+    return best_acc, resume_ckpt_path
 
 
-def acc_over_unlabeled(net, val_loader, device):
+def loss_and_probs_over_unlabeled(net, val_loader):
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
     # setup progressbar
     val_loader_with_progbar = tqdm(val_loader, unit="batch")
     val_loader_with_progbar.set_description(f"Accuracy over unlabeled Data ")
@@ -130,20 +170,22 @@ def acc_over_unlabeled(net, val_loader, device):
     net.eval()
     batch_size = val_loader.batch_size
     losses = np.zeros(val_loader.sampler.num_samples)
+    probs = np.zeros((val_loader.sampler.num_samples, len(val_loader.dataset.classes)))
     criterion = nn.CrossEntropyLoss(reduction='none')
     with torch.no_grad():
         for i_batch, (inputs, targets) in enumerate(val_loader_with_progbar):
             # perform inference
             inputs, targets = inputs.to(device), targets.to(device)
             outputs = net(inputs)
+            probs = outputs.cpu().detach().numpy()
 
             # compute metrics
             curr_losses = criterion(outputs, targets).cpu().detach().numpy()
             losses[i_batch*batch_size:(i_batch+1)*batch_size] = curr_losses
-    return losses
+    return losses, probs
 
 
-def prepare_dataloaders(data_root, batch_size, labelled_portion):
+def prepare_dataloaders(data_root, batch_size, labelled_portion, dataset_name):
     # define the dataloader transformation for train & val
     trafo_train = transforms.Compose([
         transforms.RandomCrop(32, padding=4),
@@ -157,8 +199,13 @@ def prepare_dataloaders(data_root, batch_size, labelled_portion):
     ])
 
     # prepare the full train & test datasets
-    train_set_full = torchvision.datasets.CIFAR10(root=data_root, train=True, download=False, transform=trafo_train)
-    val_set = torchvision.datasets.CIFAR10(root=data_root, train=False, download=False, transform=trafo_val)
+    assert not ("mnsit" in ["mnist", "cifar"]), "Dataset name must be in ['mnist', 'cifar']"
+    if dataset_name == "mnist":
+        train_set_full = MNIST(root=data_root, train=True, download=True, transform=trafo_train)
+        val_set = MNIST(root=data_root, train=False, download=True, transform=trafo_val)
+    else:
+        train_set_full = torchvision.datasets.CIFAR10(root=data_root, train=True, download=True, transform=trafo_train)
+        val_set = torchvision.datasets.CIFAR10(root=data_root, train=False, download=True, transform=trafo_val)
 
     # generate random indices to split the training set into a labeled and unlabeled set
     random_indices, num_labeled_train_samples = random_index_generation(train_set_full, labelled_portion)
@@ -191,10 +238,25 @@ def random_index_generation(train_set_full, labelled_portion):
     return random_indices, num_labeled_samples
 
 
-def label_additional_data(train_set_labeled, train_set_unlabeled, indices_to_sample, batch_size):
+def label_additional_data(train_set_labeled, train_set_unlabeled,
+                          indices_to_label, indices_to_keep_unlabelled, batch_size):
+    indices_to_label = np.sort(indices_to_label)
+    indices_to_keep_unlabelled = np.sort(indices_to_keep_unlabelled)
+    # append data and labels to the labelled train set
     train_set_labeled.data = np.append(train_set_labeled.data,
-                                       train_set_unlabeled.data[indices_to_sample, ...], axis=0)
-    train_set_labeled.targets += list(np.asarray(train_set_unlabeled.targets, dtype=np.int64)[indices_to_sample])
+                                       train_set_unlabeled.data[indices_to_label, ...], axis=0)
+    train_set_labeled.targets += list(np.asarray(train_set_unlabeled.targets,
+                                                 dtype=np.int64)[indices_to_label])
 
-    return torch.utils.data.DataLoader(train_set_labeled, batch_size=batch_size, shuffle=True, num_workers=0)
+    # remove the same data and labels from the unlabelled train set
+    train_set_unlabeled.data = np.append(train_set_unlabeled.data,
+                                         train_set_unlabeled.data[indices_to_keep_unlabelled, ...], axis=0)
+    train_set_unlabeled.targets += list(np.asarray(train_set_unlabeled.targets,
+                                                   dtype=np.int64)[indices_to_keep_unlabelled])
+
+    # create a data loader for the labelled train set
+    loader_train_labeled = torch.utils.data.DataLoader(train_set_labeled,
+                                                       batch_size=batch_size, shuffle=True, num_workers=0)
+
+    return loader_train_labeled, train_set_labeled, train_set_unlabeled
 
